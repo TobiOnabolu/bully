@@ -34,6 +34,8 @@ Read the [Design doc](docs/design.md) for the architecture, data flow, and basel
 
 ## Install
 
+For automatic enforcement in Codex, see [Codex installation and behavior](docs/codex.md).
+
 ```text
 /plugin marketplace add https://github.com/dynamik-dev/bully
 /plugin install bully
