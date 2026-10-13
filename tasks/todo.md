@@ -9,7 +9,9 @@
   and completes with HOOK_VERIFIED.
 - [x] Verify real Codex apply_patch triggers semantic evaluation; Codex records
   the no-eval verdict and completes with SEMANTIC_HOOK_VERIFIED.
-- [ ] Final checks, PR/CI, merge and installation from the merged Git revision.
+- [x] Final checks: 476 passed, one existing skip; all lint/dogfood checks passed.
+- [x] Opened personal-fork PR #1 and enabled its existing CI workflow.
+- [ ] PR/CI, merge and installation from the merged Git revision (see PR status).
 
 ## Review
 
