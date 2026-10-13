@@ -24,6 +24,7 @@ bench = ["anthropic>=0.40"]
 
 [project.scripts]
 bully = "bully.cli:main"
+bully-codex = "bully.codex:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
