@@ -104,6 +104,56 @@ def changes(state: dict) -> dict[str, str | None]:
     return current
 
 
+def begin_tool(state: dict, tool_id: str) -> None:
+    """Capture a tool's input state, not changes made while this chat was idle."""
+    pending = state.setdefault("pending_tools", {})
+    if tool_id in pending:
+        raise ValueError(f"Duplicate PreToolUse for {tool_id}")
+    before: dict = {}
+    initialize(before, Path(state["root"]), Path(state["config"]))
+    pending[tool_id] = before
+    state["paired_tracking"] = True
+
+
+def claim_changes(state: dict, before: dict) -> None:
+    owned = set(state["touched"])
+    for name in changes(before):
+        if name not in owned:
+            # Semantic diffs start before THIS tool, including externally updated
+            # or preexisting dirty contents, rather than at session startup.
+            state["initial"][name] = original(before, name)
+            owned.add(name)
+    state["touched"] = sorted(owned)
+
+
+def tool_changes(state: dict, event: str, tool_id: str | None) -> tuple[dict, str | None]:
+    """Retain owned paths; missing/interrupted hook pairs stay conservative."""
+    error = None
+    pending = state.setdefault("pending_tools", {})
+    if event == "PostToolUse":
+        before = pending.pop(tool_id, None)
+        if before is None:
+            # Old hosts without IDs retain the original conservative contract.
+            # A missing pair on a paired host must not silently excuse a write.
+            current = changes(state)
+            if tool_id or state.get("paired_tracking"):
+                error = "Bully is missing PreToolUse for this tool; checking the session baseline conservatively."
+            return current, error
+        claim_changes(state, before)
+    elif event in ("Stop", "SubagentStop"):
+        if not state.get("paired_tracking"):
+            return changes(state), None
+        # A killed tool may write without producing PostToolUse. Claim its edits
+        # once, then close the interval so future external writes are not owned.
+        for before in pending.values():
+            claim_changes(state, before)
+        pending.clear()
+    else:
+        return {}, None
+    root = Path(state["root"])
+    return {name: content(root / name) for name in state["touched"]}, error
+
+
 def diff_for(state: dict, name: str, value: str | None) -> str:
     before = original(state, name) or ""
     # Normalize line terminators so a missing final newline cannot glue a

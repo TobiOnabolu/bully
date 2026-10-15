@@ -29,21 +29,39 @@ directory; nested configs require a chat rooted in that subproject.
 ## Behavior
 
 ```text
-SessionStart / first PreToolUse → capture Git baseline
-PostToolUse                    → detect changes → run Bully → return failures
-Stop / SubagentStop            → rerun checks → require all error rules to pass
+PreToolUse                  → snapshot this tool's starting files
+PostToolUse                 → claim changes during this tool → run Bully
+Stop / SubagentStop         → recheck claimed files and interrupted tools
 ```
 
-Tracked, staged, untracked and newly committed files are compared with the
-session's starting state. Preexisting dirty content is left alone until it
-changes. Git-ignored untracked files are excluded. File deletion still runs
-project-level scripts (scripts without a `{file}` placeholder) and contributes
-to session-rule matching. Per-file scripts and AST rules skip deleted files.
+With Codex's `tool_use_id`, each tool has its own before/after snapshot. Updates
+already present before that tool (including another chat's Git pull, staged edits
+or untracked files) are not attributed to this session. A shell edit committed
+within the same tool is still checked. Claimed files stay subject to Stop checks
+across commits, later reads and compaction; semantic diffs retain the contents
+from before the first owning tool. Parallel calls have separate snapshots.
 
-The hook includes shell and MCP tool calls, catching writes outside apply_patch.
-It caches unchanged intermediate scans, but Stop always rechecks. State and
-semantic receipts live under `~/.local/state/bully-codex`, isolated and locked
-per session and worktree. `BULLY_CODEX_STATE_DIR` overrides this for testing.
+A missing PreToolUse on a paired host blocks and conservatively checks the old
+session baseline. Stop collects interrupted tools' changes rather than losing
+writes whose PostToolUse never arrived. Older hosts without tool IDs retain the
+original conservative session-baseline behavior. Upgrading does not discard
+already-recorded touched files or pending semantic checks. Existing falsely
+attributed state needs a backed-up, evidence-based repair; do not clear all
+sessions or reset genuine failures.
+
+Git-ignored untracked files are excluded. File deletion still runs project-level
+scripts (without a `{file}` placeholder) and contributes to session rules.
+Per-file scripts and AST rules skip deleted files. Hooks include shell and MCP
+tool calls, catching writes outside apply_patch. Unchanged intermediate scans are
+cached, but Stop always rechecks. State and semantic receipts live under
+`~/.local/state/bully-codex`, isolated and locked per session and worktree.
+`BULLY_CODEX_STATE_DIR` overrides this for testing.
+
+Snapshots establish a tool interval, not OS-level writer identity. Concurrent
+external writes during an active tool may still be attributed conservatively;
+Git updates performed within that tool are also checked. Use separate worktrees
+and root each chat in its intended worktree for concurrent implementation. The
+hook follows the chat's cwd, not arbitrary directories mentioned in commands.
 
 Prose rules send Bully's policy/evidence payload to the current Codex agent. The
 hook provides an exact `bully-codex verdict` command for each requested rule.

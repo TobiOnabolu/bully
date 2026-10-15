@@ -12,7 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bully.cli.hook_mode import find_config_upward
-from bully.codex.state import changes, content, diff_for, digest, git, initialize, locked_state
+from bully.codex.state import (
+    begin_tool,
+    content,
+    diff_for,
+    digest,
+    git,
+    initialize,
+    locked_state,
+    tool_changes,
+)
 from bully.config.loader import parse_config
 from bully.config.scope import filter_rules, scope_glob_matches
 from bully.config.skip import effective_skip_patterns, path_matches_skip
@@ -161,16 +170,20 @@ def hook(payload: dict) -> dict:
                 "decision": "block",
                 "reason": "Bully config location changed during the session. Start a new session to use the new configuration.",
             }
+        if event == "PreToolUse" and payload.get("tool_use_id"):
+            begin_tool(state, payload["tool_use_id"])
         if event in ("SessionStart", "PreToolUse"):
             return {}
-        current = changes(state)
+        current, tracking_error = tool_changes(state, event, payload.get("tool_use_id"))
         signature = digest(
             json.dumps([current, config_checksum(str(config)), trust_status(str(config))])
         )
         stop = event in ("Stop", "SubagentStop")
-        if not stop and signature == state.get("last_scan"):
+        if not stop and not tracking_error and signature == state.get("last_scan"):
             return {}
         errors = evaluate(state, key, config, current, stop)
+        if tracking_error:
+            errors.insert(0, tracking_error)
         state["last_scan"] = signature
         if errors:
             return {"decision": "block", "reason": "\n\n".join(errors)}
