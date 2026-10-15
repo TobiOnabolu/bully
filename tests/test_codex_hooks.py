@@ -348,3 +348,152 @@ def test_install_preserves_existing_hook_and_is_idempotent(ws, tmp_path):
     assert ws.run("install", "--hooks-file", str(path)).returncode == 0
     assert json.loads(path.read_text()) == data
     assert len(list(tmp_path.glob("hooks.json.bully-backup-*"))) == 1
+
+
+def paired(ws, event, tool="read", session="observer"):
+    return ws.hook(event, session=session, tool_use_id=tool, tool_name="Bash")
+
+
+def test_other_chat_commit_is_not_claimed_by_read_only_session(ws):
+    ws.hook("SessionStart", session="observer")
+    paired(ws, "PreToolUse")
+    assert paired(ws, "PostToolUse") == {}
+    paired(ws, "PreToolUse", "edit", "writer")
+    ws.write("one.sh", "if then\n")
+    ws.git("add", "one.sh")
+    ws.git("commit", "-qm", "other chat change")
+    assert paired(ws, "PostToolUse", "edit", "writer")["decision"] == "block"
+    assert ws.hook("Stop", session="observer") == {}
+    paired(ws, "PreToolUse", "read-again")
+    assert paired(ws, "PostToolUse", "read-again") == {}
+    assert ws.hook("Stop", session="writer")["decision"] == "block"
+
+
+def test_other_chat_dirty_and_staged_changes_are_not_claimed(ws):
+    paired(ws, "PreToolUse")
+    paired(ws, "PostToolUse")
+    ws.write("one.sh", "if then\n")
+    ws.write("new.sh", "if then\n")
+    ws.git("add", "one.sh")
+    paired(ws, "PreToolUse", "second")
+    assert paired(ws, "PostToolUse", "second") == {}
+    assert ws.hook("Stop", session="observer") == {}
+    paired(ws, "PreToolUse", "third")
+    ws.write("one.sh", "if then changed\n")
+    assert paired(ws, "PostToolUse", "third")["decision"] == "block"
+
+
+def test_own_write_and_commit_remains_checked_after_external_commit(ws):
+    paired(ws, "PreToolUse", "own")
+    ws.write("one.sh", "if then\n")
+    ws.git("add", "one.sh")
+    ws.git("commit", "-qm", "own committed failure")
+    assert paired(ws, "PostToolUse", "own")["decision"] == "block"
+    ws.write("other.sh", "echo external\n")
+    ws.git("add", "other.sh")
+    ws.git("commit", "-qm", "external change")
+    paired(ws, "PreToolUse", "read")
+    assert paired(ws, "PostToolUse", "read") == {}  # unchanged intermediate scan is cached
+    assert ws.hook("Stop", session="observer")["decision"] == "block"
+    paired(ws, "PreToolUse", "repair")
+    ws.write("one.sh", "echo repaired\n")
+    assert paired(ws, "PostToolUse", "repair") == {}
+    assert ws.hook("Stop", session="observer") == {}
+
+
+def test_parallel_tool_ids_and_interrupted_call_preserve_edits(ws):
+    paired(ws, "PreToolUse", "first")
+    ws.write("one.sh", "if then\n")
+    paired(ws, "PreToolUse", "second")
+    assert paired(ws, "PostToolUse", "second") == {}
+    assert paired(ws, "PostToolUse", "first")["decision"] == "block"
+    paired(ws, "PreToolUse", "repair")
+    ws.write("one.sh", "echo fixed\n")
+    assert paired(ws, "PostToolUse", "repair") == {}
+    paired(ws, "PreToolUse", "interrupted")
+    ws.write("new.sh", "if then\n")
+    assert ws.hook("Stop", session="observer")["decision"] == "block"
+    # A restart/compaction must not discard pending work or existing failures.
+    ws.hook("SessionStart", session="observer")
+    assert ws.hook("Stop", session="observer")["decision"] == "block"
+
+
+def test_unpaired_posttool_blocks_instead_of_ignoring_possible_writes(ws):
+    paired(ws, "PreToolUse")
+    paired(ws, "PostToolUse")
+    ws.write("one.sh", "if then\n")
+    out = paired(ws, "PostToolUse", "missing-pre")
+    assert out["decision"] == "block"
+    assert "PreToolUse" in out["reason"]
+    assert ws.hook("Stop", session="observer")["decision"] == "block"
+
+
+def test_paired_tracking_preserves_existing_legacy_failures(ws):
+    ws.hook("SessionStart", session="observer")
+    ws.write("one.sh", "if then\n")
+    assert ws.hook(session="observer")["decision"] == "block"
+    paired(ws, "PreToolUse")
+    assert paired(ws, "PostToolUse") == {}  # Stop must still enforce the old failure
+    assert ws.hook("Stop", session="observer")["decision"] == "block"
+
+
+def test_semantic_diff_uses_actual_pretool_contents(ws):
+    ws.write(".bully.yml", SEMANTIC_CONFIG)
+    ws.trust()
+    paired(ws, "PreToolUse")
+    paired(ws, "PostToolUse")
+    ws.write("new.js", "eval(existing);\n")
+    ws.git("add", ".")
+    ws.git("commit", "-qm", "external baseline")
+    paired(ws, "PreToolUse", "own")
+    ws.write("new.js", "eval(existing);\neval(added);\n")
+    out = paired(ws, "PostToolUse", "own")
+    assert "+eval(added);" in out["reason"]
+    assert "+eval(existing);" not in out["reason"]
+    assert ws.receipt().returncode == 0
+    assert ws.hook("Stop", session="observer") == {}
+
+
+def test_external_update_before_first_tool_is_baseline(ws):
+    ws.hook("SessionStart", session="observer")
+    ws.write("one.sh", "if then\n")
+    ws.git("add", "one.sh")
+    ws.git("commit", "-qm", "external update before first tool")
+    paired(ws, "PreToolUse")
+    assert paired(ws, "PostToolUse") == {}
+    assert ws.hook("Stop", session="observer") == {}
+
+
+def test_paired_deletion_runs_project_checks(ws):
+    ws.write(".bully.yml", SCRIPT_CONFIG.replace("bash -n {file}", "test -f one.sh"))
+    ws.trust()
+    paired(ws, "PreToolUse")
+    (ws.path / "one.sh").unlink()
+    ws.git("add", "one.sh")
+    ws.git("commit", "-qm", "own deletion")
+    assert paired(ws, "PostToolUse")["decision"] == "block"
+    assert ws.hook("Stop", session="observer")["decision"] == "block"
+
+
+def test_paired_dependency_and_semantic_checks_remain_live(ws):
+    ws.write(".bully.yml", SEMANTIC_CONFIG)
+    ws.trust()
+    paired(ws, "PreToolUse")
+    ws.write("new.js", "const value = 1;\n")
+    assert "SEMANTIC REVIEW REQUIRED" in paired(ws, "PostToolUse")["reason"]
+    assert ws.receipt().returncode == 0
+    assert ws.hook("Stop", session="observer") == {}
+    paired(ws, "PreToolUse", "edit-again")
+    ws.write("new.js", "eval(input);\n")
+    assert "SEMANTIC REVIEW REQUIRED" in paired(ws, "PostToolUse", "edit-again")["reason"]
+    assert ws.hook("Stop", session="observer")["decision"] == "block"
+
+
+def test_stop_closes_interrupted_interval_without_claiming_future_external_edits(ws):
+    paired(ws, "PreToolUse", "interrupted")
+    ws.write("one.sh", "echo own edit\n")
+    assert ws.hook("Stop", session="observer") == {}
+    ws.write("external.sh", "if then\n")
+    ws.git("add", ".")
+    ws.git("commit", "-qm", "external after interrupted tool ended")
+    assert ws.hook("Stop", session="observer") == {}
